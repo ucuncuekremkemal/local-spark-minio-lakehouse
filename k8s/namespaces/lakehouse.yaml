@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lakehouse
+  labels:
+    name: lakehouse
+    project: local-spark-minio-lakehouse
+    environment: local
+    purpose: data-platform

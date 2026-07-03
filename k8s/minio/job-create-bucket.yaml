@@ -1,0 +1,57 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-create-bucket
+  namespace: lakehouse
+  labels:
+    app: minio
+    component: bucket-bootstrap
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app: minio
+        component: bucket-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-bucket
+          image: minio/mc:latest
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-secret
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-secret
+                  key: MINIO_ROOT_PASSWORD
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+
+              echo "Waiting for MinIO service to become available..."
+
+              until mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
+                echo "MinIO is not ready yet. Retrying in 5 seconds..."
+                sleep 5
+              done
+
+              echo "Creating datalake bucket if it does not already exist..."
+              mc mb --ignore-existing local/datalake
+
+              echo "Creating lakehouse layer prefixes..."
+              echo "" | mc pipe local/datalake/raw/.keep
+              echo "" | mc pipe local/datalake/bronze/.keep
+              echo "" | mc pipe local/datalake/silver/.keep
+              echo "" | mc pipe local/datalake/gold/.keep
+              echo "" | mc pipe local/datalake/checkpoints/.keep
+              echo "" | mc pipe local/datalake/audit/.keep
+              echo "" | mc pipe local/datalake/metadata/.keep
+
+              echo "Bucket bootstrap completed."

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orchestration
+  labels:
+    project: local-spark-minio-lakehouse
+    layer: control-plane
+    component: orchestration
+    environment: local

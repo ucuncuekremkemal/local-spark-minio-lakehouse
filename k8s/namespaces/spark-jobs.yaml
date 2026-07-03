@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spark-jobs
+  labels:
+    project: local-spark-minio-lakehouse
+    layer: compute
+    component: spark-workloads
+    environment: local
