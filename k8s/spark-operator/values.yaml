@@ -1,0 +1,13 @@
+spark:
+  jobNamespaces:
+    - spark-jobs
+
+  serviceAccount:
+    create: true
+    name: spark
+
+controller:
+  replicas: 1
+
+webhook:
+  enable: true
