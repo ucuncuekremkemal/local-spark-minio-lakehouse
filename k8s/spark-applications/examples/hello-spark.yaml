@@ -1,0 +1,53 @@
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: hello-spark
+  namespace: spark-jobs
+  labels:
+    app: hello-spark
+    project: local-spark-minio-lakehouse
+spec:
+  type: Python
+  mode: cluster
+
+  image: apache/spark:3.5.3
+  imagePullPolicy: IfNotPresent
+
+  mainApplicationFile: local:///opt/spark/jobs/hello_spark.py
+  sparkVersion: 3.5.3
+
+  restartPolicy:
+    type: Never
+
+  sparkConf:
+    spark.sql.shuffle.partitions: "2"
+    spark.kubernetes.executor.deleteOnTermination: "false"
+
+  driver:
+    cores: 1
+    memory: 512m
+    serviceAccount: spark
+    labels:
+      app: hello-spark
+      role: driver
+    volumeMounts:
+      - name: hello-spark-code-volume
+        mountPath: /opt/spark/jobs
+        readOnly: true
+
+  executor:
+    cores: 1
+    instances: 1
+    memory: 512m
+    labels:
+      app: hello-spark
+      role: executor
+    volumeMounts:
+      - name: hello-spark-code-volume
+        mountPath: /opt/spark/jobs
+        readOnly: true
+
+  volumes:
+    - name: hello-spark-code-volume
+      configMap:
+        name: hello-spark-code

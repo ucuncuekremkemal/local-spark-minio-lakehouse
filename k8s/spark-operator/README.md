@@ -381,32 +381,7 @@ The job completed successfully
 
 ---
 
-## Important Troubleshooting Lesson
 
-An image pull error occurred during the first run.
-
-Incorrect image:
-
-```yaml
-image: apache/spark:v3.5.3
-```
-
-Correct image:
-
-```yaml
-image: apache/spark:3.5.3
-```
-
-The difference is important:
-
-```text
-apache/spark:v3.5.3  → invalid tag
-apache/spark:3.5.3   → valid tag
-```
-
-Kubernetes failed with `ImagePullBackOff` because the invalid image tag did not exist.
-
----
 
 ## Useful Commands
 

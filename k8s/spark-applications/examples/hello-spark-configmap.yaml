@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hello-spark-code
+  namespace: spark-jobs
+  labels:
+    app: hello-spark
+    component: spark-code
+    project: local-spark-minio-lakehouse
+data:
+  hello_spark.py: |
+    from pyspark.sql import SparkSession
+    from pyspark.sql.functions import col, count, avg
+
+
+    def main():
+        spark = (
+            SparkSession.builder
+            .appName("HelloSparkMountedCode")
+            .getOrCreate()
+        )
+
+        print("=== Hello from custom mounted PySpark code ===")
+
+        data = [
+            ("USDTRY", "2026-07-01", 39.10),
+            ("USDTRY", "2026-07-02", 39.25),
+            ("USDTRY", "2026-07-03", 39.40),
+            ("EURTRY", "2026-07-01", 42.10),
+            ("EURTRY", "2026-07-02", 42.30),
+            ("EURTRY", "2026-07-03", 42.55),
+            ("GBPTRY", "2026-07-01", 49.80),
+            ("GBPTRY", "2026-07-02", 50.10),
+        ]
+
+        columns = ["currency_pair", "rate_date", "rate"]
+
+        df = spark.createDataFrame(data, columns)
+
+        print("=== Input Data ===")
+        df.show(truncate=False)
+
+        print("=== Repartitioning DataFrame to force executor-side work ===")
+
+        repartitioned_df = df.repartition(2, col("currency_pair"))
+
+        result_df = (
+            repartitioned_df
+            .groupBy("currency_pair")
+            .agg(
+                count("*").alias("record_count"),
+                avg("rate").alias("avg_rate")
+            )
+            .orderBy("currency_pair")
+        )
+
+        print("=== Aggregated Result ===")
+        result_df.show(truncate=False)
+
+        print("=== Job completed successfully ===")
+
+        spark.stop()
+
+
+    if __name__ == "__main__":
+        main()
