@@ -1,0 +1,159 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: raw-to-bronze-scheduler
+  namespace: spark-jobs
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: raw-to-bronze-scheduler-role
+  namespace: spark-jobs
+rules:
+  - apiGroups:
+      - sparkoperator.k8s.io
+    resources:
+      - sparkapplications
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+    verbs:
+      - get
+      - list
+      - watch
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: raw-to-bronze-scheduler-rolebinding
+  namespace: spark-jobs
+subjects:
+  - kind: ServiceAccount
+    name: raw-to-bronze-scheduler
+    namespace: spark-jobs
+roleRef:
+  kind: Role
+  name: raw-to-bronze-scheduler-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: raw-to-bronze-klines-cronjob
+  namespace: spark-jobs
+spec:
+  schedule: "7 * * * *"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Allow
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: raw-to-bronze-scheduler
+          restartPolicy: Never
+          containers:
+            - name: submit-sparkapplication
+              image: bitnami/kubectl:latest
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+
+                  START_DATE=$(date -u -d "1 hour ago" +%Y-%m-%d)
+                  START_HOUR=$(date -u -d "1 hour ago" +%H)
+                  END_DATE=$(date -u +%Y-%m-%d)
+                  END_HOUR=$(date -u +%H)
+
+                  APP_NAME="raw-to-bronze-klines-${START_DATE//-/}${START_HOUR}"
+
+                  echo "Submitting SparkApplication: ${APP_NAME}"
+                  echo "START_DATE=${START_DATE}"
+                  echo "START_HOUR=${START_HOUR}"
+                  echo "END_DATE=${END_DATE}"
+                  echo "END_HOUR=${END_HOUR}"
+
+                  cat <<EOF | kubectl apply -f -
+                  apiVersion: sparkoperator.k8s.io/v1beta2
+                  kind: SparkApplication
+                  metadata:
+                    name: ${APP_NAME}
+                    namespace: spark-jobs
+                  spec:
+                    type: Python
+                    mode: cluster
+                    image: raw-to-bronze-klines:1.0.0
+                    imagePullPolicy: IfNotPresent
+                    mainApplicationFile: local:///opt/spark/jobs/main.py
+                    sparkVersion: 3.5.3
+                    restartPolicy:
+                      type: Never
+
+                    sparkConf:
+                      spark.sql.caseSensitive: "true"
+                      spark.sql.sources.partitionOverwriteMode: dynamic
+                      spark.hadoop.fs.s3a.endpoint: http://minio.lakehouse.svc.cluster.local:9000
+                      spark.hadoop.fs.s3a.path.style.access: "true"
+                      spark.hadoop.fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+                      spark.hadoop.fs.s3a.connection.ssl.enabled: "false"
+                      spark.hadoop.fs.s3a.aws.credentials.provider: com.amazonaws.auth.EnvironmentVariableCredentialsProvider
+                      spark.jars.packages: org.apache.hadoop:hadoop-aws:3.3.4
+                      spark.jars.ivy: /tmp/.ivy2
+
+                    driver:
+                      cores: 1
+                      memory: 512m
+                      serviceAccount: spark
+                      env:
+                        - name: START_DATE
+                          value: "${START_DATE}"
+                        - name: START_HOUR
+                          value: "${START_HOUR}"
+                        - name: END_DATE
+                          value: "${END_DATE}"
+                        - name: END_HOUR
+                          value: "${END_HOUR}"
+                        - name: AWS_ACCESS_KEY_ID
+                          valueFrom:
+                            secretKeyRef:
+                              name: minio-secret
+                              key: MINIO_ROOT_USER
+                        - name: AWS_SECRET_ACCESS_KEY
+                          valueFrom:
+                            secretKeyRef:
+                              name: minio-secret
+                              key: MINIO_ROOT_PASSWORD
+
+                    executor:
+                      instances: 1
+                      cores: 1
+                      memory: 512m
+                      env:
+                        - name: AWS_ACCESS_KEY_ID
+                          valueFrom:
+                            secretKeyRef:
+                              name: minio-secret
+                              key: MINIO_ROOT_USER
+                        - name: AWS_SECRET_ACCESS_KEY
+                          valueFrom:
+                            secretKeyRef:
+                              name: minio-secret
+                              key: MINIO_ROOT_PASSWORD
+                  EOF

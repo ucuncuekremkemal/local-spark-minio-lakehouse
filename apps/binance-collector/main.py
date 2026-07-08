@@ -7,11 +7,17 @@ from uuid import uuid4
 
 import boto3
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 
 BINANCE_WS_URL = "wss://data-stream.binance.vision/ws/btcusdt@kline_1m"
-RECONNECT_DELAY_SECONDS = 5
+RECONNECT_DELAY_SECONDS = int(os.getenv("RECONNECT_DELAY_SECONDS", "5"))
 FLUSH_INTERVAL_SECONDS = int(os.getenv("FLUSH_INTERVAL_SECONDS", "300"))
+MESSAGE_TIMEOUT_SECONDS = int(os.getenv("MESSAGE_TIMEOUT_SECONDS", "90"))
+
+
+def log(message: str) -> None:
+    print(f"{utc_now().isoformat()} | {message}", flush=True)
 
 
 def get_required_env(name: str) -> str:
@@ -64,7 +70,7 @@ def wrap_message(message: str) -> dict:
     }
 
 
-def flush_buffer_to_minio(s3, bucket: str, buffer: list[dict]) -> None:
+def flush_buffer_to_minio(s3, bucket: str, buffer: list[dict], reason: str) -> None:
     if not buffer:
         return
 
@@ -81,54 +87,120 @@ def flush_buffer_to_minio(s3, bucket: str, buffer: list[dict]) -> None:
         ContentType="application/x-ndjson",
     )
 
-    print(f"Flushed {len(buffer)} records to s3://{bucket}/{object_key}", flush=True)
+    log(
+        f"Flushed {len(buffer)} records to s3://{bucket}/{object_key} "
+        f"reason={reason}"
+    )
 
 
 async def receive_messages(s3):
     ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
 
     bucket = get_required_env("MINIO_BUCKET")
     buffer: list[dict] = []
     last_flush_time = utc_now()
+    last_message_time: datetime | None = None
+    reconnect_count = 0
 
     while True:
         try:
-            print(f"Connecting to Binance WebSocket: {BINANCE_WS_URL}", flush=True)
+            log(f"Connecting to Binance WebSocket: {BINANCE_WS_URL}")
 
             async with websockets.connect(
                 BINANCE_WS_URL,
                 ssl=ssl_context,
-                ping_interval=None,
+                ping_interval=20,
+                ping_timeout=20,
+                close_timeout=10,
+                open_timeout=20,
             ) as websocket:
-                print("Connected to Binance WebSocket", flush=True)
+                reconnect_count += 1
+                log(f"Connected to Binance WebSocket connection_number={reconnect_count}")
 
-                async for message in websocket:
-                    record = wrap_message(message)
-                    buffer.append(record)
-
+                while True:
                     now = utc_now()
                     should_flush_by_time = (
                         now - last_flush_time
                     ).total_seconds() >= FLUSH_INTERVAL_SECONDS
 
                     if should_flush_by_time:
-                        flush_buffer_to_minio(s3=s3, bucket=bucket, buffer=buffer)
+                        flush_buffer_to_minio(
+                            s3=s3,
+                            bucket=bucket,
+                            buffer=buffer,
+                            reason="time_interval",
+                        )
                         buffer.clear()
                         last_flush_time = now
 
+                    try:
+                        message = await asyncio.wait_for(
+                            websocket.recv(),
+                            timeout=MESSAGE_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        log(
+                            f"No WebSocket message received for "
+                            f"{MESSAGE_TIMEOUT_SECONDS} seconds; forcing reconnect"
+                        )
+                        flush_buffer_to_minio(
+                            s3=s3,
+                            bucket=bucket,
+                            buffer=buffer,
+                            reason="message_timeout",
+                        )
+                        buffer.clear()
+                        last_flush_time = utc_now()
+                        break
+
+                    record = wrap_message(message)
+                    buffer.append(record)
+                    last_message_time = utc_now()
+
+                    if len(buffer) == 1:
+                        log(
+                            f"Receiving messages; latest_symbol="
+                            f"{record['payload'].get('s', 'UNKNOWN')}"
+                        )
+
         except asyncio.CancelledError:
-            print("Collector stopped by cancellation", flush=True)
-            flush_buffer_to_minio(s3=s3, bucket=bucket, buffer=buffer)
+            log("Collector stopped by cancellation")
+            flush_buffer_to_minio(
+                s3=s3,
+                bucket=bucket,
+                buffer=buffer,
+                reason="cancelled",
+            )
             raise
-        except Exception as exc:
-            print(f"WebSocket connection failed or closed: {exc}", flush=True)
-            flush_buffer_to_minio(s3=s3, bucket=bucket, buffer=buffer)
+        except ConnectionClosed as exc:
+            log(
+                f"WebSocket connection closed: code={exc.code} "
+                f"reason={exc.reason!r} last_message_time={last_message_time}"
+            )
+            flush_buffer_to_minio(
+                s3=s3,
+                bucket=bucket,
+                buffer=buffer,
+                reason="connection_closed",
+            )
             buffer.clear()
             last_flush_time = utc_now()
-            print(f"Reconnecting in {RECONNECT_DELAY_SECONDS} seconds...", flush=True)
-            await asyncio.sleep(RECONNECT_DELAY_SECONDS)
+        except Exception as exc:
+            log(
+                f"WebSocket connection failed or collector error: "
+                f"{type(exc).__name__}: {exc} last_message_time={last_message_time}"
+            )
+            flush_buffer_to_minio(
+                s3=s3,
+                bucket=bucket,
+                buffer=buffer,
+                reason="exception",
+            )
+            buffer.clear()
+            last_flush_time = utc_now()
+
+        log(f"Reconnecting in {RECONNECT_DELAY_SECONDS} seconds...")
+        await asyncio.sleep(RECONNECT_DELAY_SECONDS)
 
 
 if __name__ == "__main__":
@@ -137,4 +209,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(receive_messages(s3_client))
     except KeyboardInterrupt:
-        print("Collector stopped manually", flush=True)
+        log("Collector stopped manually")

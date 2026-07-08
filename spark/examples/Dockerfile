@@ -4,7 +4,7 @@ USER root
 
 RUN mkdir -p /opt/spark/jobs
 
-COPY spark/jobs/ /opt/spark/jobs/
+COPY /hello_spark.py /opt/spark/jobs/
 
 RUN chown -R spark:spark /opt/spark/jobs
 

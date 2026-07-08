@@ -1,324 +1,322 @@
-# Local Spark MinIO Lakehouse
+# Local Spark + MinIO Lakehouse on Kubernetes
 
-This project is a production-like local data platform built on Kubernetes for learning modern Data Engineering and lakehouse architecture concepts.
+This project is a local, Kubernetes-native lakehouse pipeline built for learning and experimenting with Spark, MinIO, and cloud-native batch processing patterns.
 
-The goal is to simulate a real Spark-on-Kubernetes lakehouse environment locally using Kubernetes, MinIO, Spark Operator, custom Spark Docker images, and Parquet-based lakehouse layers. Later phases may include Apache Iceberg, Kafka, and an orchestration API.
+The goal is not only to run Spark locally, but to understand how a production-like data platform can be designed with separate ingestion, storage, scheduling, and processing layers.
 
-The project is intentionally designed as a learning-oriented but production-like system. It is not just a simple local demo. Each component is structured to reflect how real data platforms separate storage, compute, platform operators, job execution, and orchestration.
+## Architecture
 
----
+```mermaid
+flowchart LR
+    A[Binance WebSocket] --> B[Python Collector Deployment]
+    B --> C[MinIO Raw Zone - JSONL]
+    C --> D[SparkApplication - Raw to Bronze]
+    D --> E[MinIO Bronze Zone - Parquet]
 
-## Architecture Overview
-
-```text
-Kubernetes Cluster
-│
-├── lakehouse
-│   ├── MinIO StatefulSet
-│   ├── MinIO Headless Service
-│   ├── MinIO Client-facing Service
-│   ├── PersistentVolumeClaims
-│   └── Bucket bootstrap Job
-│
-├── spark-operator
-│   ├── Spark Operator controller
-│   └── Spark Operator webhook
-│
-├── spark-jobs
-│   ├── SparkApplication resources
-│   ├── Spark driver pods
-│   └── Spark executor pods
-│
-└── orchestration
-    └── Future FastAPI orchestration/control API
+    F[Kubernetes CronJob] --> G[Dynamic SparkApplication YAML]
+    G --> D
 ```
 
----
+## Current Pipeline
 
-## Namespace Design
+The current pipeline ingests Binance BTCUSDT 1-minute kline data and stores it in a local MinIO-backed lakehouse.
 
-The project separates platform responsibilities into multiple namespaces.
+### Data Flow
 
-| Namespace | Purpose |
-|---|---|
-| `lakehouse` | Storage layer: MinIO, buckets, PVCs, and future lakehouse storage components |
-| `spark-operator` | Spark Operator controller and webhook namespace |
-| `spark-jobs` | SparkApplication resources, Spark driver pods, and Spark executor pods |
-| `orchestration` | Future orchestration API for triggering and tracking Spark pipelines |
+1. A Python collector connects to Binance WebSocket.
+2. Incoming messages are written to MinIO as raw JSONL files.
+3. A Kubernetes CronJob runs every hour.
+4. The CronJob dynamically creates a SparkApplication.
+5. Spark reads the previous hour's raw JSONL data.
+6. Spark transforms the data into typed Bronze Parquet format.
+7. Bronze data is written back to MinIO partitioned by symbol, date, and hour.
 
-This separation is intentional. It keeps storage, compute, operator, and orchestration responsibilities isolated, similar to a real production platform.
+## Lakehouse Zones
 
----
-
-## Repository Structure
-
-```text
-local-spark-minio-lakehouse/
-├── README.md
-├── docker/
-│   └── spark/
-│       └── Dockerfile
-├── k8s/
-│   ├── namespaces/
-│   │   ├── lakehouse.yaml
-│   │   ├── orchestration.yaml
-│   │   ├── spark-jobs.yaml
-│   │   └── spark-operator.yaml
-│   ├── minio/
-│   │   ├── README.md
-│   │   ├── secret.example.yaml
-│   │   ├── secret.yaml
-│   │   ├── service-headless.yaml
-│   │   ├── service.yaml
-│   │   ├── statefulset.yaml
-│   │   └── job-create-bucket.yaml
-│   ├── spark-operator/
-│   │   ├── README.md
-│   │   └── values.yaml
-│   └── spark-applications/
-│       ├── examples/
-│       │   ├── first-spark-job.yaml
-│       │   ├── hello-spark-configmap.yaml
-│       │   └── hello-spark-image.yaml
-│       └── jobs/
-│           └── minio-write-test.yaml
-├── spark/
-│   ├── jobs/
-│   │   ├── hello_spark.py
-│   │   └── minio_write_test.py
-│   └── common/
-│       └── __init__.py
-└── docs/
-    ├── architecture.md
-    ├── minio.md
-    ├── spark-operator.md
-    └── development-flow.md
-```
-
-The structure separates Kubernetes manifests, Spark application code, Docker image definitions, and documentation.
-
----
-
-## Core Components
-
-### MinIO Lakehouse Storage
-
-MinIO is used as the local S3-compatible object storage layer.
-
-The current MinIO setup includes:
-
-- `StatefulSet`-based deployment
-- 4 MinIO pods
-- 4 PVCs, one per pod
-- Headless service for stable internal pod discovery
-- ClusterIP service for client access
-- Bootstrap job for bucket and prefix creation
-
-The main bucket is:
+MinIO bucket:
 
 ```text
 datalake
 ```
 
-The initial lakehouse layout is:
+Main prefixes:
 
 ```text
-datalake/
-├── raw/
-├── bronze/
-├── silver/
-├── gold/
-├── checkpoints/
-├── audit/
-└── metadata/
+raw/
+bronze/
+silver/
+gold/
+checkpoints/
+audit/
+metadata/
 ```
 
----
+Current raw path:
+
+```text
+raw/market/binance/klines_1m/symbol=BTCUSDT/date=YYYY-MM-DD/hour=HH/
+```
+
+Current bronze path:
+
+```text
+bronze/market/binance/klines_1m/symbol=BTCUSDT/date=YYYY-MM-DD/hour=HH/
+```
+
+## Kubernetes Namespaces
+
+```text
+lakehouse       -> MinIO
+ingestion       -> Binance collector
+spark-operator  -> Spark Operator
+spark-jobs      -> SparkApplication, Spark driver/executor pods, scheduler CronJob
+```
+
+## Main Components
+
+### MinIO
+
+MinIO is used as the local object storage layer.
+
+It acts as an S3-compatible storage backend for Spark and the collector.
+
+### Binance Collector
+
+The collector is a Python application running as a Kubernetes Deployment.
+
+It connects to Binance WebSocket and writes raw market events to MinIO as JSONL files.
+
+The collector intentionally writes source-close raw data. It does not deduplicate, aggregate, or normalize the payload at this stage.
 
 ### Spark Operator
 
-Spark jobs are submitted through Spark Operator using `SparkApplication` resources.
+Spark Operator manages SparkApplication custom resources on Kubernetes.
 
-The operator is installed in the `spark-operator` namespace and watches Spark jobs in the `spark-jobs` namespace.
+Instead of manually running `spark-submit`, Spark jobs are submitted declaratively as Kubernetes resources.
 
-The current Spark job execution model is:
+### Raw to Bronze Spark Job
 
-```text
-SparkApplication YAML
-        ↓
-Spark Operator
-        ↓
-Driver pod
-        ↓
-Executor pod(s)
-```
+The raw-to-bronze job reads raw JSONL files from MinIO and writes typed Parquet files to the Bronze layer.
 
-This project uses the Kubeflow Spark Operator style `SparkApplication` API.
+The job performs:
 
----
+- timestamp conversion
+- decimal casting for price and volume fields
+- long casting for trade and event identifiers
+- boolean casting for candle close status
+- partitioned Parquet output
 
-### Custom Spark Image
+Bronze intentionally keeps both open and closed kline updates. Deduplication and final candle selection belong to the Silver layer.
 
-Spark application code is packaged into a custom Docker image.
+### CronJob Scheduler
 
-Current image pattern:
+The hourly scheduler is implemented as a Kubernetes CronJob.
 
-```text
-spark/jobs/*.py
-        ↓
-Docker build
-        ↓
-local-spark-jobs:<tag>
-        ↓
-SparkApplication image field
-        ↓
-Driver and executor pods
-```
+Instead of using one static SparkApplication YAML, the CronJob dynamically generates a new SparkApplication for each hourly run.
 
-The Dockerfile lives under:
+Example generated SparkApplication names:
 
 ```text
-docker/spark/Dockerfile
+raw-to-bronze-klines-2026070813
+raw-to-bronze-klines-2026070814
+raw-to-bronze-klines-2026070815
 ```
 
-Example build command:
+This keeps each Spark run isolated and easier to inspect.
 
-```bash
-docker build -t local-spark-jobs:0.1.0 -f docker/spark/Dockerfile .
+## Why Dynamic SparkApplication?
+
+A static SparkApplication is useful for manual testing, but it is not ideal for recurring batch jobs.
+
+This project uses a dynamic SparkApplication pattern because:
+
+- each run gets a unique name
+- driver pod names become unique
+- hourly run history is easier to inspect
+- manual delete/apply loops are avoided
+- the processing window is calculated automatically
+
+The CronJob calculates:
+
+```text
+START_DATE / START_HOUR = previous UTC hour
+END_DATE / END_HOUR     = current UTC hour
 ```
 
-SparkApplication then references the image:
+The Spark job processes data using an end-exclusive interval:
+
+```text
+[START, END)
+```
+
+For example, if the CronJob runs at `14:05 UTC`, it processes:
+
+```text
+13:00 <= data < 14:00
+```
+
+## Important Spark Settings
+
+The SparkApplication uses the following important Spark configurations:
 
 ```yaml
-image: local-spark-jobs:0.1.0
-imagePullPolicy: IfNotPresent
+spark.sql.caseSensitive: "true"
+spark.sql.sources.partitionOverwriteMode: dynamic
+spark.hadoop.fs.s3a.endpoint: http://minio.lakehouse.svc.cluster.local:9000
+spark.hadoop.fs.s3a.path.style.access: "true"
+spark.hadoop.fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+spark.hadoop.fs.s3a.connection.ssl.enabled: "false"
+spark.hadoop.fs.s3a.aws.credentials.provider: com.amazonaws.auth.EnvironmentVariableCredentialsProvider
+spark.jars.packages: org.apache.hadoop:hadoop-aws:3.3.4
+spark.jars.ivy: /tmp/.ivy2
 ```
 
-This is the primary development model going forward. ConfigMap-based code mounting was tested for learning volume mounts, but custom images are the preferred pattern for application packaging.
+### caseSensitive
 
----
+Binance JSON contains fields such as `e` and `E`, `t` and `T`, `l` and `L`.
+
+Spark is case-insensitive by default, so case sensitivity is required.
+
+### dynamic partition overwrite
+
+The Bronze job writes to a partitioned base path.
+
+Dynamic partition overwrite ensures that only the partitions included in the current DataFrame are overwritten.
+
+This prevents one hourly job from deleting the full Bronze table.
+
+## Build Images
+
+Build the Binance collector image:
+
+```bash
+docker build -t binance-collector:1.0.0 -f apps/binance-collector/Dockerfile apps/binance-collector
+```
+
+Build the raw-to-bronze Spark image:
+
+```bash
+docker build -t raw-to-bronze-klines:1.0.0 -f spark/jobs/raw_to_bronze_klines/Dockerfile spark/jobs/raw_to_bronze_klines
+```
+
+## Deploy Core Components
+
+Apply namespaces:
+
+```bash
+kubectl apply -f k8s/namespaces/
+```
+
+Deploy MinIO:
+
+```bash
+kubectl apply -f k8s/minio/
+```
+
+Deploy Spark Operator resources:
+
+```bash
+kubectl apply -f k8s/spark-operator/
+```
+
+Deploy the Binance collector:
+
+```bash
+kubectl apply -f k8s/ingestion/
+```
+
+Deploy the hourly raw-to-bronze scheduler:
+
+```bash
+kubectl apply -f k8s/schedules/raw-to-bronze-klines-cronjob.yaml
+```
+
+## Trigger CronJob Manually
+
+To test the CronJob without waiting for the next scheduled run:
+
+```bash
+kubectl create job \
+  --from=cronjob/raw-to-bronze-klines-cronjob \
+  raw-to-bronze-klines-manual-001 \
+  -n spark-jobs
+```
+
+## Useful Commands
+
+Check MinIO pods:
+
+```bash
+kubectl get pods -n lakehouse
+```
+
+Check collector logs:
+
+```bash
+kubectl logs -f deployment/binance-collector -n ingestion
+```
+
+Check CronJobs:
+
+```bash
+kubectl get cronjobs -n spark-jobs
+```
+
+Check scheduler jobs:
+
+```bash
+kubectl get jobs -n spark-jobs
+```
+
+Check SparkApplications:
+
+```bash
+kubectl get sparkapplications -n spark-jobs
+```
+
+Check Spark driver and executor pods:
+
+```bash
+kubectl get pods -n spark-jobs
+```
+
+Follow Spark driver logs:
+
+```bash
+kubectl logs -f <spark-driver-pod-name> -n spark-jobs
+```
+
+Open MinIO Console:
+
+```bash
+kubectl port-forward svc/minio -n lakehouse 9001:9001
+```
+
+Then open:
+
+```text
+http://localhost:9001
+```
 
 ## Current Status
 
 Completed:
 
-- Kubernetes namespace layout
-- Production-like MinIO object storage layer
-- StatefulSet-based MinIO deployment
-- 4 MinIO pods with 4 PVCs
-- Headless service for internal pod discovery
-- ClusterIP service for client access
-- Bucket bootstrap job
-- Lakehouse bucket structure
-- Spark Operator installation
-- Spark job namespace setup
-- First SparkApplication execution
-- ConfigMap-based code mount test
-- Custom Spark image build and execution
-- PySpark job execution with driver and executor pods
+- Kubernetes namespaces
+- MinIO StatefulSet and bucket structure
+- Binance WebSocket collector
+- Raw JSONL ingestion
+- Spark Operator setup
+- Raw to Bronze PySpark job
+- Dynamic hourly SparkApplication submission with Kubernetes CronJob
+- Bronze Parquet output partitioned by symbol, date, and hour
 
-Next steps:
+Next possible steps:
 
-- Cleanly organize example SparkApplication manifests
-- Add a MinIO write test Spark job
-- Write sample data to MinIO as Parquet
-- Build raw → bronze → silver → gold Spark pipeline
-- Add shared Spark utilities under `spark/common`
-- Add orchestration API for triggering Spark jobs
-- Later evaluate Iceberg and Kafka integration
-
----
-
-## Local Development Flow
-
-The main development loop is:
-
-```text
-Edit PySpark code
-        ↓
-Build custom Spark image
-        ↓
-Update SparkApplication image tag if needed
-        ↓
-Apply SparkApplication YAML
-        ↓
-Inspect driver logs and SparkApplication status
-```
-
-Common commands:
-
-```bash
-# Build Spark image
-docker build -t local-spark-jobs:0.1.0 -f docker/spark/Dockerfile .
-
-# Submit a SparkApplication
-kubectl apply -f k8s/spark-applications/jobs/<job-name>.yaml
-
-# Watch pods
-kubectl get pods -n spark-jobs -w
-
-# Read driver logs
-kubectl logs <driver-pod-name> -n spark-jobs
-
-# Check SparkApplications
-kubectl get sparkapplications -n spark-jobs
-```
-
----
-
-## Future Target Architecture
-
-```text
-Client / API caller
-        ↓
-orchestration namespace
-        ↓
-FastAPI job trigger API
-        ↓
-spark-jobs namespace
-        ↓
-SparkApplication
-        ↓
-Spark Driver Pod
-        ↓
-Spark Executor Pods
-        ↓
-lakehouse namespace
-        ↓
-MinIO datalake bucket
-        ↓
-raw / bronze / silver / gold
-```
-
----
-
-## Learning Goals
-
-This project is designed to teach and practice:
-
-- Kubernetes namespaces and resource separation
-- StatefulSet vs Deployment
-- Headless Service vs normal Service
-- PVC per pod pattern
-- S3-compatible object storage with MinIO
-- Lakehouse storage layout
-- Spark driver/executor architecture
-- Spark on Kubernetes
-- Spark Operator and SparkApplication resources
-- Custom Spark Docker image packaging
-- PySpark job parameterization
-- Parquet writes to object storage
-- Raw, bronze, silver, and gold lakehouse layering
-- Spark resource tuning
-- Production-like orchestration and job triggering
-- Data platform design principles
-
----
-
-## Notes
-
-This is a local learning project. It uses production-like patterns, but it is not a production-ready deployment.
-
-For example, MinIO runs with multiple pods and PVCs, but all resources are still backed by the local Docker Desktop Kubernetes environment. Therefore, it should be understood as a production architecture simulation rather than a real highly available storage system.
-
-Secrets should not be committed to Git. Keep real secret files such as `k8s/minio/secret.yaml` local, and commit only example files such as `secret.example.yaml`.
+- Silver layer with closed-candle filtering
+- deduplication by symbol, interval, and kline start time
+- gap detection
+- REST-based backfill for missing candles
+- Gold layer aggregations
+- data quality checks
+- table format migration with Iceberg, Delta, or Hudi
